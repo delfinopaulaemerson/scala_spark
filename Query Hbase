@@ -1,0 +1,181 @@
+with dispositivos_empresa as( 
+
+select distinct migracaorazaosocial_business_tax_id cnpj,
+
+        migracaorazaosocial_name_elem razao_social,
+
+        ofertasassinante_prim_resource_val msisdn,
+
+                               imsi_iccid,
+
+😀️        regexp_replace(cc.bancnpjciclo_cycle_start_date, '-', '') cycle_start,
+
+ 😀️       regexp_replace(cc.bancnpjciclo_cycle_close_date, '-', '') cycle_end
+
+from db_m2m_work.cadastro_cliente cc
+
+where datamovto = '20210228'
+
+-- and migracaorazaosocial_business_tax_id in ('04401579000155')
+
+),
+
+last_datamovto as (
+
+select cd.msisdn, max(cd.datamovto) datamovto
+
+from dispositivos_empresa de
+
+    left join db_m2m_work.consumo_dispositivo cd
+
+    on de.msisdn = cd.msisdn
+
+        and cd.datamovto >= '20210127' and cd.datamovto <= '20210228'
+
+group by cd.msisdn
+
+),
+
+msisdn_timestamp as (
+
+select ld.msisdn, ld.datamovto, max(lr.timestamp_radius) timestamp_radius
+
+    from last_datamovto ld
+
+        left join db_m2m_work.leituras_radius lr
+
+        on lr.calling_station_id = ld.msisdn
+
+        and ld.datamovto = lr.datamovto
+
+group by ld.msisdn, ld.datamovto
+
+),
+
+msisdn_cgi as (
+
+select mt.msisdn,
+
+        mt.datamovto,
+
+        mt.timestamp_radius,
+
+        lr.3gpp_user_location_info,
+
+        from_unixtime (mt.timestamp_radius - (3*60*60), 'yyyyMMdd HHmmss') data_hora,
+
+    if (length(trim (3gpp_user_location_info)) >= 18,
+
+concat (
+
+-- plmn
+
+concat(
+
+                upper(substring(3gpp_user_location_info, 6, 1)),
+
+                upper(substring(3gpp_user_location_info, 5, 1)),
+
+                upper(substring(3gpp_user_location_info, 8, 1)),
+
+                upper(substring(3gpp_user_location_info, 10, 1)),
+
+                upper(substring(3gpp_user_location_info, 9, 1))
+
+                                               ),
+
+-- tac
+
+                lpad(conv(substring(3gpp_user_location_info, 11, 4), 16, 10), 5, "0"),
+
+-- eci
+
+if (
+
+                substring(3gpp_user_location_info, 1, 4) = '0x82',
+
+                lpad(conv(substring(3gpp_user_location_info, 21, 8), 16, 10), 8, "0"),
+
+                lpad(conv(substring(3gpp_user_location_info, 15, 4), 16, 10), 5, "0")
+
+                )
+
+) ,
+
+NULL) cgi
+
+    from msisdn_timestamp mt
+
+        left join db_m2m_work.leituras_radius lr
+
+        on mt.msisdn = lr.calling_station_id
+
+        and mt.datamovto = lr.datamovto
+
+        and mt.timestamp_radius = lr.timestamp_radius
+
+),
+
+msisdn_lat_long as (                    
+
+select mc.msisdn, mc.datamovto, mc.timestamp_radius, mc.data_hora,
+
+                mc.cgi, cs.latitude, cs.longitude
+
+    from msisdn_cgi mc
+
+    left join db_m2m_work.cadastro_sites cs
+
+    on mc.cgi = cs.id_localizacao
+
+                and cs.datamovto = '20210228'
+
+)
+
+,
+
+consumo_mes as (   
+
+select de.cnpj, de.razao_social, de.msisdn,
+
+    de.cycle_start, de.cycle_end, cd.datamovto, cast(consumption as double) consumo
+
+    from dispositivos_empresa de
+
+    join db_m2m_work.consumo_dispositivo cd
+
+    on de.msisdn = cd.msisdn
+
+    where cd.datamovto >= '20210127' and cd.datamovto <= '20210128'
+
+),
+
+msisdn_consumo as (
+
+select cnpj, razao_social, msisdn, cycle_start, cycle_end, sum (consumo) consumo_ciclo
+
+    from consumo_mes cm
+
+    where cycle_start <= datamovto
+
+        and datamovto <= cycle_end
+
+group by cnpj, razao_social, msisdn, cycle_start, cycle_end
+
+)
+
+select de.cnpj, de.razao_social, de.msisdn, de.imsi_iccid, de.cycle_start, de.cycle_end, mc.consumo_ciclo,
+
+                mll.datamovto, mll.timestamp_radius timestamp_ultima_sessao, mll.data_hora data_hora_ultima_sessao,
+
+        mll.cgi cgi_ultima_sessao, mll.latitude latitude_ultima_sessao, mll.longitude longitude_ultima_sessao
+
+        from dispositivos_empresa de
+
+        left join msisdn_consumo mc
+
+            on de.msisdn = mc.msisdn
+
+        left join msisdn_lat_long mll
+
+                on de.msisdn = mll.msisdn;
